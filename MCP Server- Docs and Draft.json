@@ -1,0 +1,111 @@
+{
+  "name": "MCP Server- Docs and Draft",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "c8e1083d-59c0-44f2-9a21-530aea81e530"
+      },
+      "id": "bdbf1f20-bf3e-4d9f-b608-c50cf5d9702e",
+      "name": "MCP Server Trigger",
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "c8e1083d-59c0-44f2-9a21-530aea81e530"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentURL": "https://docs.google.com/document/d/1Q6dIC72iogPBMh3-l2COwXG5jZnLlqAKPRGoGY1gWKw/edit?tab=t.0",
+        "actionsUi": {
+          "actionFields": [
+            {
+              "action": "insert",
+              "text": "={{ $fromAI('entry_text', `The full formatted log entry to append to the end of the doc: date, top themes, weekly pulse, fee issue, explanation bullets and source links`, 'string') }}"
+            }
+          ]
+        }
+      },
+      "id": "33a4369d-2540-4bd1-870b-e846f7f9534e",
+      "name": "append_to_doc",
+      "type": "n8n-nodes-base.googleDocsTool",
+      "typeVersion": 2,
+      "position": [
+        96,
+        208
+      ],
+      "credentials": {
+        "googleDocsOAuth2Api": {
+          "id": "jk21EcTkC4SKdoQk",
+          "name": "Google Docs account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Subject', ``, 'string') }}",
+        "emailType": "html",
+        "message": "={{ $fromAI('Message', `The full HTML email body, passed exactly as given, including all HTML tags`, 'string') }}",
+        "options": {
+          "sendTo": "kanfatima289@gmail.com"
+        }
+      },
+      "id": "fa200dd8-e1e1-473c-b825-23ff353f9bdd",
+      "name": "create_email_draft",
+      "type": "n8n-nodes-base.gmailTool",
+      "typeVersion": 2.2,
+      "position": [
+        256,
+        208
+      ],
+      "webhookId": "91f54e1f-f7e1-409e-a034-42c0ffa6f884",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "2u0Qq79gCDkZ5Q3p",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "append_to_doc": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "create_email_draft": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "35fcf971-f08a-4e93-b3c5-85b07f594ca8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e27a08e65a03bebdc8b58bdd7af566c0af0d1adee32d1f03a08b706808633ad0"
+  },
+  "nodeGroups": [],
+  "id": "Qin3Y3GRw1Pxud6k",
+  "tags": []
+}

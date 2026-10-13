@@ -1,0 +1,629 @@
+{
+  "name": "Review Intelligence + Fee Explainer",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Upload Reviews CSV",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "data",
+              "fieldType": "file",
+              "acceptFileTypes": ".csv"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9a8759b2-0fc2-4901-8e08-0d5979046f65",
+      "name": "On form submission",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        48,
+        -320
+      ],
+      "webhookId": "d4c111fd-50b9-427e-9c27-3d6171f95edd"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "f1a8d205-a2fd-47cf-8843-2874772bb603",
+      "name": "Extract from File",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        128,
+        96
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json)\n  .filter(r => r.review_text && r.review_text.trim().length > 15);\n\n// Anchor the window to the newest review, so older datasets still work\nconst dates = rows.map(r => new Date(r.date)).filter(d => !isNaN(d));\nconst newest = dates.length ? new Date(Math.max(...dates)) : new Date();\nconst cutoff = new Date(newest);\ncutoff.setDate(cutoff.getDate() - 12 * 7);\n\nconst reviews = rows\n  .filter(r => !r.date || new Date(r.date) >= cutoff)\n  .slice(0, 200) // token safety\n  .map((r, i) => ({ id: i + 1, rating: r.rating, text: r.review_text.trim().slice(0, 400) }));\n\nreturn [{ json: {\n  analysed: reviews.length,\n  reviews_list: reviews,\n  reviews_block: reviews.map(r => `[${r.id}] (${r.rating}★) ${r.text}`).join(\"\\n\")\n}}];"
+      },
+      "id": "c6791ff4-c442-4dd0-97d5-f7b15df71577",
+      "name": "Clean and filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a product analyst. Return ONLY valid JSON. Quotes must be copied verbatim from the reviews. Never invent text. \nAnalyse these {{ $json.analysed }} app reviews.\n\n1. Cluster into AT MOST 5 themes (name, description, review_count, sentiment).\n2. Pick the top 3 themes by volume and severity.\n3. Extract EXACTLY 3 verbatim user quotes (<30 words each) with review ID and theme. Copy only the review text: do NOT include the [id] or the (N★) rating prefix in the quote.\n4. Identify ONE recurring confusion about a fee/charge: fee_name,\n   what users misunderstand, 2 evidence quotes with IDs.\n\nSchema:\n{\"themes\":[{\"name\":\"\",\"description\":\"\",\"review_count\":0,\"sentiment\":\"\"}],\n \"top_themes\":[\"\",\"\",\"\"],\n \"quotes\":[{\"id\":0,\"quote\":\"\",\"theme\":\"\"}],\n \"fee_issue\":{\"fee_name\":\"\",\"misunderstanding\":\"\",\"evidence\":[{\"id\":0,\"quote\":\"\"}]}}\n\nREVIEWS:\n{{ $json.reviews_block }}",
+        "options": {
+          "systemMessage": "You are a product analyst for Groww, an Indian mutual fund investing app. Return ONLY valid JSON. Copy quotes verbatim from the reviews; never invent text."
+        }
+      },
+      "id": "a5fa395d-545b-4813-b53e-1f603086139b",
+      "name": "Review Intelligence",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        576,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "e6946383-b022-40dd-957c-d424a6028a3b",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        576,
+        224
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "let raw = String($input.first().json.text || $input.first().json.output || \"\");\nconst start = raw.indexOf(\"{\");\nif (start === -1) throw new Error(\"Review Intelligence returned no JSON object\");\nraw = raw.slice(start).trim();\n\n// Closes unterminated strings and unbalanced braces/brackets (model sometimes drops the final brace)\nfunction repair(s) {\n  const stack = [];\n  let inStr = false, esc = false;\n  for (const ch of s) {\n    if (inStr) {\n      if (esc) esc = false;\n      else if (ch === \"\\\\\") esc = true;\n      else if (ch === '\"') inStr = false;\n      continue;\n    }\n    if (ch === '\"') inStr = true;\n    else if (ch === \"{\" || ch === \"[\") stack.push(ch);\n    else if (ch === \"}\" || ch === \"]\") stack.pop();\n  }\n  let out = s;\n  if (inStr) out += '\"';\n  out = out.replace(/,\\s*$/, \"\");\n  while (stack.length) out += stack.pop() === \"{\" ? \"}\" : \"]\";\n  return out;\n}\n\nlet data;\ntry {\n  data = JSON.parse(raw);\n} catch (e1) {\n  try {\n    data = JSON.parse(raw.slice(0, raw.lastIndexOf(\"}\") + 1)); // drop trailing text / code fences\n  } catch (e2) {\n    try {\n      data = JSON.parse(repair(raw.replace(/```\\s*$/, \"\").trim()));\n    } catch (e3) {\n      throw new Error(\"Review Intelligence returned invalid JSON: \" + e1.message);\n    }\n  }\n}\n\nif (data.themes.length > 5) throw new Error(\"More than 5 themes\");\nif (data.top_themes.length !== 3) throw new Error(\"Need exactly 3 top themes\");\nif (data.quotes.length !== 3) throw new Error(\"Need exactly 3 quotes\");\n\n// Anti-hallucination check against the source reviews\n// Strip prompt artifacts the model sometimes copies: \"[12]\" ids and \"(4★)\" rating tags, wrapping quotes\nconst clean = t => String(t || \"\")\n  .replace(/^\\s*(\\[\\d+\\]\\s*)?(\\(\\s*\\d\\s*★\\s*\\)\\s*)?/, \"\")\n  .replace(/^[\"“”']+|[\"“”']+$/g, \"\")\n  .trim();\nconst norm = t => String(t || \"\").toLowerCase().replace(/\\s+/g, \" \").trim();\nconst source = norm($('Clean and filter').first().json.reviews_list.map(r => r.text).join(\" \"));\nconst isReal = quote => {\n  const n = norm(quote).replace(/\\.{3}$|…$/, \"\").trim();\n  return n.length > 0 && source.includes(n.slice(0, 40));\n};\ndata.quotes.forEach(q => { q.quote = clean(q.quote); q.verified = isReal(q.quote); });\nif (data.fee_issue && Array.isArray(data.fee_issue.evidence)) {\n  data.fee_issue.evidence.forEach(e => { e.quote = clean(e.quote); });\n}\nconst bad = data.quotes.filter(q => !q.verified);\nif (bad.length) throw new Error(\"Unverified quote found: \" + bad.map(q => '\"' + q.quote.slice(0, 60) + '\"').join(\", \"));\n\nreturn [{ json: data }];"
+      },
+      "id": "2d996846-9bf4-4c62-98c8-13d6d46a6074",
+      "name": "Parse and Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        848,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write an internal weekly product pulse of about 180-210 words (hard maximum 250), from this analysis:\n{{ JSON.stringify($json) }}\n\nSections:\n1. Top Themes (3 one-line bullets)\n2. What Users Are Saying (the 3 quotes, attributed to \"Play Store user\")\n3. Key Observation (2-3 sentences, include the fee confusion)\n4. Action Ideas (exactly 3, each starting with a verb)\n\nConcise, internal tone. No fluff.",
+        "options": {
+          "systemMessage": "You write concise internal weekly product updates for the Groww product team. Aim for 180-210 words; never exceed 250 words."
+        }
+      },
+      "id": "1bdad526-91f3-4d0a-8e2d-2cb95ad2749d",
+      "name": "Weekly Product Pulse",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1152,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "4f869239-903f-4026-a363-153feece1bcc",
+      "name": "OpenAI Chat Model1",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1152,
+        208
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const LIMIT = 250;\nconst raw = String($json.output || $json.text || '').trim();\n// Count only real words (tokens containing a letter or digit), so markdown like -, ###, ** is not counted\nconst isWord = t => /[\\p{L}\\p{N}]/u.test(t);\nconst countWords = s => s.split(/\\s+/).filter(isWord).length;\nlet text = raw;\nlet wc = countWords(text);\nlet trimmed = false;\nif (wc > LIMIT) {\n  // Drop whole lines from the end until within the limit, keeping structure intact\n  const lines = text.split('\\n');\n  while (lines.length > 1 && countWords(lines.join('\\n')) > LIMIT) lines.pop();\n  text = lines.join('\\n').trim();\n  // Fallback: hard cut by words if a single line is still too long\n  if (countWords(text) > LIMIT) {\n    const toks = text.split(/(\\s+)/);\n    let n = 0; const out = [];\n    for (const t of toks) { if (isWord(t)) { if (n >= LIMIT) break; n++; } out.push(t); }\n    text = out.join('').trim();\n  }\n  wc = countWords(text);\n  trimmed = true;\n}\nif (!text) throw new Error('Weekly pulse is empty');\nreturn [{ json: { weekly_pulse: text, word_count: wc, trimmed } }];"
+      },
+      "id": "ed2b7204-4dda-4946-abf5-75a63dc7df88",
+      "name": "Pulse Word Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You write customer support explanations for Groww (Indian mutual fund investing app).\nUsers in recent reviews are confused about this fee/charge:\nFee: {{ $('Parse and Validate').item.json.fee_issue.fee_name }}\nWhat users misunderstand: {{ $('Parse and Validate').item.json.fee_issue.misunderstanding }}\nEvidence: {{ JSON.stringify($('Parse and Validate').item.json.fee_issue.evidence) }}\n\nWrite a standardized explanation of THIS fee that directly answers the confusion above.\nRules:\n- At most 6 bullet points, each one sentence.\n- Neutral, facts-only tone. No marketing, no apologies, no advice, no guesses about numbers you are not sure of.\n- Choose the 2 most relevant source links ONLY from this list (copy exactly):\n  https://www.amfiindia.com/investor/knowledge-center-info?zoneName=expenseRatio  (expense ratio / TER)\n  https://www.amfiindia.com/ter-of-mf-schemes  (scheme-wise TER, direct vs regular)\n  https://www.sebi.gov.in/sebi_data/faqfiles/sep-2024/1727242783639.pdf  (SEBI mutual fund FAQ: exit load, loads, charges)\n  https://groww.in/pricing  (Groww charges: brokerage, DP, stamp duty, GST, other charges)\n\nReturn ONLY valid JSON: {\"fee_name\":\"\",\"bullets\":[\"\"],\"source_links\":[\"\",\"\"]}",
+        "options": {
+          "systemMessage": "You write neutral, facts-only customer support explanations about investment fees and charges in India. Return only valid JSON."
+        }
+      },
+      "id": "36130d1a-2020-4da2-a0b0-38c490c95dd3",
+      "name": "Fee Explainer",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1808,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "378cc394-0e80-4c40-a580-0a032f0c6146",
+      "name": "OpenAI Chat Model2",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1808,
+        224
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const ALLOWED = [\n  'https://www.amfiindia.com/investor/knowledge-center-info?zoneName=expenseRatio',\n  'https://www.amfiindia.com/ter-of-mf-schemes',\n  'https://www.sebi.gov.in/sebi_data/faqfiles/sep-2024/1727242783639.pdf',\n  'https://groww.in/pricing'\n];\nlet raw = $input.first().json.output || $input.first().json.text || '';\nraw = String(raw).replace(/```json|```/g, '').trim();\nconst fee = JSON.parse(raw);\nconst bullets = (fee.bullets || []).map(b => String(b).trim()).filter(Boolean);\nif (bullets.length === 0) throw new Error('Fee explainer returned no bullets');\nif (bullets.length > 6) throw new Error('Fee explainer has more than 6 bullets');\n\nlet links = (fee.source_links || []).filter(l => ALLOWED.includes(l));\nfor (const l of ALLOWED) { if (links.length >= 2) break; if (!links.includes(l)) links.push(l); }\nlinks = links.slice(0, 2);\n\nconst analysis = $('Parse and Validate').first().json;\nconst pulse = String($('Pulse Word Check').first().json.weekly_pulse || '');\nconst date = $now.setZone('Asia/Kolkata').toFormat('yyyy-MM-dd');\nconst feeName = fee.fee_name || analysis.fee_issue.fee_name;\nconst misunderstanding = analysis.fee_issue.misunderstanding || '';\nconst topThemes = analysis.top_themes || [];\n\n// ---------- Parse the pulse into sections ----------\nconst clean = s => String(s).replace(/\\*\\*|__/g, '').replace(/^#+\\s*/, '').trim();\nconst sections = [];\nlet cur = null;\nfor (const line0 of pulse.split('\\n')) {\n  const line = line0.trim();\n  if (!line) continue;\n  const KNOWN = /^(?:\\d+[.)]\\s*)?(top themes|what users are saying|key observation|action ideas)\\s*:?$/i;\n  const known = clean(line).match(KNOWN);\n  if (known) { cur = { title: clean(line).replace(/^\\d+[.)]\\s*/, '').replace(/:$/, ''), items: [] }; sections.push(cur); continue; }\n  const bulletMatch = line.match(/^(?:[-*•]|\\d+[.)])\\s+(.*)$/);\n  const bare = clean(line).replace(/:$/, '');\n  const isHeading = !bulletMatch && !/^[\"“]/.test(bare) && (/^#+\\s/.test(line) || (bare.length <= 45 && !/[.!?\"”)]$/.test(bare) && !/[.!?]\\s/.test(bare) && !/:/.test(bare)));\n  if (isHeading) { cur = { title: clean(line).replace(/^\\d+\\.\\s*/, '').replace(/:$/, ''), items: [] }; sections.push(cur); continue; }\n  if (!cur) { cur = { title: '', items: [] }; sections.push(cur); }\n  const isQuote = /^[\"“]/.test(line);\n  cur.items.push(bulletMatch ? { type: 'li', text: clean(bulletMatch[1]) } : isQuote ? { type: 'li', text: clean(line) } : { type: 'p', text: clean(line) });\n}\n\n// ---------- HTML (Gmail draft + approval email) ----------\nconst esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\nconst H2 = 'style=\"font-size:18px;color:#1a1a1a;margin:24px 0 8px;border-bottom:2px solid #00b386;padding-bottom:4px\"';\nconst H3 = 'style=\"font-size:15px;color:#00875f;margin:18px 0 6px\"';\nconst P = 'style=\"margin:6px 0;line-height:1.5\"';\nconst UL = 'style=\"margin:6px 0 6px 20px;padding:0;line-height:1.5\"';\nconst renderItems = items => {\n  let out = ''; let inList = false;\n  for (const it of items) {\n    if (it.type === 'li') { if (!inList) { out += '<ul ' + UL + '>'; inList = true; } out += '<li style=\"margin:4px 0\">' + esc(it.text) + '</li>'; }\n    else { if (inList) { out += '</ul>'; inList = false; } out += '<p ' + P + '>' + esc(it.text) + '</p>'; }\n  }\n  if (inList) out += '</ul>';\n  return out;\n};\nconst pulseHtml = sections.map(s => (s.title ? '<h3 ' + H3 + '>' + esc(s.title) + '</h3>' : '') + renderItems(s.items)).join('');\nconst explainerHtml =\n  '<h3 ' + H3 + '>Understanding the ' + esc(feeName) + ' on Groww</h3>' +\n  '<ul ' + UL + '>' + bullets.map(b => '<li style=\"margin:4px 0\">' + esc(b) + '</li>').join('') + '</ul>' +\n  '<p ' + P + '><b>Sources:</b></p><ul ' + UL + '>' + links.map(l => '<li style=\"margin:4px 0\"><a href=\"' + esc(l) + '\">' + esc(l) + '</a></li>').join('') + '</ul>' +\n  '<p style=\"margin:10px 0;color:#666;font-size:13px\"><i>Last checked: ' + esc(date) + '</i></p>';\nconst emailHtml =\n  '<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;max-width:680px\">' +\n  '<h2 ' + H2 + '>Weekly Product Pulse — ' + esc(date) + '</h2>' + pulseHtml +\n  '<h2 ' + H2 + '>Customer Clarification (reusable support snippet)</h2>' + explainerHtml +\n  '</div>';\n\n// ---------- Neat plain text (Google Doc) ----------\nconst RULE = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';\nconst docLines = [\n  '', RULE, 'WEEKLY PRODUCT PULSE LOG — ' + date, RULE, '',\n  'TOP THEMES', ...topThemes.map((t, i) => '   ' + (i + 1) + '. ' + t), '',\n  'WEEKLY PULSE'\n];\nfor (const s of sections) {\n  if (s.title) docLines.push('', '▸ ' + s.title);\n  for (const it of s.items) docLines.push(it.type === 'li' ? '   • ' + it.text : '   ' + it.text);\n}\ndocLines.push(\n  '', 'IDENTIFIED FEE ISSUE',\n  '   Fee: ' + feeName,\n  '   What users misunderstand: ' + misunderstanding,\n  '', 'EXPLANATION (support snippet)', ...bullets.map(b => '   • ' + b),\n  '', 'SOURCES', ...links.map(l => '   • ' + l),\n  '', 'Last checked: ' + date, ''\n);\nconst docText = docLines.join('\\n');\n\nconst explainerText = ['Understanding the ' + feeName + ' on Groww', ...bullets.map(b => '- ' + b), 'Sources:', ...links.map(l => '- ' + l), 'Last checked: ' + date].join('\\n');\nconst record = {\n  date,\n  top_themes: topThemes,\n  weekly_pulse: pulse,\n  identified_fee_issue: { fee_name: feeName, misunderstanding },\n  explanation_bullets: bullets,\n  source_links: links\n};\nconst subject = 'Weekly Product Pulse + Customer Clarification — ' + date;\nconst approvalHtml = '<p style=\"font-family:Arial,sans-serif\"><b>Review before logging and drafting.</b> Approve to append this to the Google Doc and create the Gmail draft.</p><p style=\"font-family:Arial,sans-serif\"><b>Subject:</b> ' + esc(subject) + '</p><hr>' + emailHtml;\n\nreturn [{ json: { record, subject, email_body: emailHtml, email_html: emailHtml, explainer_text: explainerText, approval_html: approvalHtml, doc_entry: docText } }];"
+      },
+      "id": "7161186a-18fd-4680-9bbe-674a1f52cba1",
+      "name": "Assemble Outputs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "sendTo": "kanfatima289@gmail.com",
+        "subject": "=[Approval needed] {{ $json.subject }}",
+        "message": "={{ $json.approval_html }}",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "disapproveLabel": "Reject"
+          }
+        },
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "resumeAmount": 24
+            }
+          },
+          "appendAttribution": false
+        }
+      },
+      "id": "7a99d390-d462-4a83-ba5b-913e7f8b341a",
+      "name": "Request Approval",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2464,
+        64
+      ],
+      "webhookId": "62ce53f9-fb67-440c-b1ba-2dc2a04971be",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "2u0Qq79gCDkZ5Q3p",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "approved",
+              "leftValue": "={{ $json.data.approved }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b9f20180-ec4f-44a7-b9e9-0a2fbdf0aff7",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2688,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=The weekly outputs were approved by a human. Use the MCP tools to do exactly these two actions, once each, with the content copied verbatim:\n\n1. Call append_to_doc with entry_text set to the exact text between the markers (keep every line break):\n<<<DOC\n{{ $('Assemble Outputs').item.json.doc_entry }}\nDOC>>>\n\n2. Call create_email_draft with\nSubject: {{ $('Assemble Outputs').item.json.subject }}\nMessage (HTML — pass it exactly as-is, including all tags and attributes):\n<<<HTML\n{{ $('Assemble Outputs').item.json.email_html }}\nHTML>>>\n\nDo not include the <<< >>> marker lines. Do not change, summarise, escape or reformat the content. After both calls, reply with a one-line confirmation listing which actions succeeded.",
+        "options": {
+          "systemMessage": "You are an operations assistant. You only execute the requested MCP tool calls with the exact content given, each exactly once."
+        }
+      },
+      "id": "05b8c124-06d2-4495-8058-d0b25da495fd",
+      "name": "Log via MCP",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        2912,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "af64d0a7-8f20-4d9e-90f5-8779c6e48537",
+      "name": "OpenAI Chat Model3",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2928,
+        32
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "endpointUrl": "https://kanfatima289.app.n8n.cloud/mcp/c8e1083d-59c0-44f2-9a21-530aea81e530",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "5ead4a00-041b-4200-82a3-122f0825b0d7",
+      "name": "docs_and_draft_mcp",
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.4,
+      "position": [
+        3056,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "status",
+              "name": "status",
+              "value": "rejected_or_timed_out",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "05758181-aaac-41cb-9ad3-6739f5cc19b8",
+      "name": "Rejected - Nothing Logged",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2976,
+        208
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Clean and filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean and filter": {
+      "main": [
+        [
+          {
+            "node": "Review Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review Intelligence": {
+      "main": [
+        [
+          {
+            "node": "Parse and Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Review Intelligence",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse and Validate": {
+      "main": [
+        [
+          {
+            "node": "Weekly Product Pulse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Product Pulse": {
+      "main": [
+        [
+          {
+            "node": "Pulse Word Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Weekly Product Pulse",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pulse Word Check": {
+      "main": [
+        [
+          {
+            "node": "Fee Explainer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fee Explainer": {
+      "main": [
+        [
+          {
+            "node": "Assemble Outputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Fee Explainer",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Outputs": {
+      "main": [
+        [
+          {
+            "node": "Request Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Approval": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Log via MCP",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rejected - Nothing Logged",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Log via MCP",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "docs_and_draft_mcp": {
+      "ai_tool": [
+        [
+          {
+            "node": "Log via MCP",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "f3fe893d-2b0e-41e5-894a-14a66e726327",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e27a08e65a03bebdc8b58bdd7af566c0af0d1adee32d1f03a08b706808633ad0"
+  },
+  "nodeGroups": [
+    {
+      "id": "5c532e93-fe28-4773-ba58-749e1c2cc23c",
+      "name": "Prepare review data",
+      "nodeIds": [
+        "f1a8d205-a2fd-47cf-8843-2874772bb603",
+        "c6791ff4-c442-4dd0-97d5-f7b15df71577"
+      ],
+      "description": "Reads the uploaded CSV, drops short reviews and keeps the last 12 weeks (max 200)"
+    },
+    {
+      "id": "548c9e8a-8fce-4ec5-939b-3d98a1a595ad",
+      "name": "Find review themes",
+      "nodeIds": [
+        "a5fa395d-545b-4813-b53e-1f603086139b",
+        "e6946383-b022-40dd-957c-d424a6028a3b",
+        "2d996846-9bf4-4c62-98c8-13d6d46a6074"
+      ],
+      "description": "Clusters up to 5 themes, picks top 3, pulls 3 verified quotes and the most confusing fee"
+    },
+    {
+      "id": "55c7e3da-dd3c-42e4-ac47-383c8e358b1c",
+      "name": "Write weekly pulse",
+      "nodeIds": [
+        "1bdad526-91f3-4d0a-8e2d-2cb95ad2749d",
+        "4f869239-903f-4026-a363-153feece1bcc",
+        "ed2b7204-4dda-4946-abf5-75a63dc7df88"
+      ],
+      "description": "Internal note for the product team, capped at 250 words"
+    },
+    {
+      "id": "413bf117-adca-408c-8f61-c53504cef011",
+      "name": "Explain confusing fee",
+      "nodeIds": [
+        "36130d1a-2020-4da2-a0b0-38c490c95dd3",
+        "378cc394-0e80-4c40-a580-0a032f0c6146",
+        "7161186a-18fd-4680-9bbe-674a1f52cba1"
+      ],
+      "description": "Up to 6 neutral bullets with 2 official links and last-checked date, packaged for the doc and email"
+    },
+    {
+      "id": "680be69e-be3d-4bf2-bb64-2b24795ea52e",
+      "name": "Approve and share",
+      "nodeIds": [
+        "7a99d390-d462-4a83-ba5b-913e7f8b341a",
+        "b9f20180-ec4f-44a7-b9e9-0a2fbdf0aff7",
+        "05b8c124-06d2-4495-8058-d0b25da495fd",
+        "af64d0a7-8f20-4d9e-90f5-8779c6e48537",
+        "5ead4a00-041b-4200-82a3-122f0825b0d7",
+        "05758181-aaac-41cb-9ad3-6739f5cc19b8"
+      ],
+      "description": "Emails you for approval; only on Approve does it append to the doc and create the email draft over MCP"
+    }
+  ],
+  "id": "icDW2iP0WG5qKsor",
+  "tags": []
+}
